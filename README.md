@@ -23,3 +23,9 @@
 ## Статус
 
 Бутстрап. Легаси-эксперимент этого аккаунта (`gha-cluster-*`, `gha-worker-*`) — воркфлоу отключены 01.10.2026.
+
+Входная точка: `POST https://llm-ladder.trainedassist.store/pool/trigger` (Bearer
+`POOL_TRIGGER_TOKEN`) → `repository_dispatch` сюда → `.github/workflows/agent-task.yml`.
+Пока секреты `RUNNER_API_URL`/`RUNNER_API_KEY` не заданы, джоба честно отвечает «принято»
+и выходит 0; remote-режим (submit `RunSpec` с engine `fake` → poll status → result) включится
+после деплоя VM-сервиса (runner-jobs#12).
