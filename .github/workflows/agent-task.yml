@@ -1,0 +1,102 @@
+name: agent-task
+
+# Приёмник пула ранов: dispatch с POST /pool/trigger лестницы
+# (llm-ladder.trainedassist.store/pool/trigger → repository_dispatch сюда) либо ручной запуск.
+# Правило владельца: большие данные (ГБ) НИКОГДА не идут через endpoint/API — только метаданные
+# и presigned-ссылки; здесь task — строка ≤4000 символов, artifactRef — ссылка, не файл.
+
+on:
+  repository_dispatch:
+    types: [agent-task]
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Task text (≤4000 chars)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      EVENT_JSON: ${{ toJSON(github.event) }}
+      RUNNER_API_URL: ${{ secrets.RUNNER_API_URL }}
+      RUNNER_API_KEY: ${{ secrets.RUNNER_API_KEY }}
+    steps:
+      - name: Read payload
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TASK=$(jq -r '.inputs.task // empty' <<<"$EVENT_JSON")
+            REPO=""; PROFILE=""; ARTIFACT_REF=""
+          else
+            TASK=$(jq -r '.client_payload.task // empty' <<<"$EVENT_JSON")
+            REPO=$(jq -r '.client_payload.repo // empty' <<<"$EVENT_JSON")
+            PROFILE=$(jq -r '.client_payload.profile // empty' <<<"$EVENT_JSON")
+            ARTIFACT_REF=$(jq -r '.client_payload.artifactRef // empty' <<<"$EVENT_JSON")
+          fi
+          if [ -z "$TASK" ]; then
+            echo "::error::task is empty — nothing to run"
+            exit 1
+          fi
+          # Payload в лог: task обрезан до 500 символов. artifactRef как ссылку НЕ печатаем целиком —
+          # в ней может быть presigned TTL-токен, а логи этого репозитория публичные: только длина.
+          printf 'task (%d chars): %.500s\n' "${#TASK}" "$TASK"
+          printf 'repo=%s profile=%s artifactRef_len=%d\n' "$REPO" "$PROFILE" "${#ARTIFACT_REF}"
+          printf '%s' "$TASK" > "$RUNNER_TEMP/task.txt"
+
+      - name: Run via the runner API (remote mode)
+        if: env.RUNNER_API_URL != '' && env.RUNNER_API_KEY != ''
+        run: |
+          set -euo pipefail
+          # RunSpec-подмножество (формат trained-assist/ai-agent-runner src/api):
+          # engine fake + input.inlinePrompt = task; server-owned поля не шлём.
+          jq -n --rawfile task "$RUNNER_TEMP/task.txt" \
+            '{engine:{name:"fake",adapterVersion:"1"},input:{inlinePrompt:$task},envAllowlist:[],limits:{timeoutMs:600000}}' \
+            > "$RUNNER_TEMP/spec.json"
+          IDEM="pool-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          code=$(curl -sS -o "$RUNNER_TEMP/submit.json" -w '%{http_code}' \
+            -X POST "$RUNNER_API_URL/v1/runs" \
+            -H "Authorization: Bearer $RUNNER_API_KEY" \
+            -H 'Content-Type: application/json' \
+            -H "Idempotency-Key: $IDEM" \
+            --data-binary "@$RUNNER_TEMP/spec.json")
+          if [ "$code" != 202 ] && [ "$code" != 200 ]; then
+            echo "::error::submit failed: HTTP $code"
+            cat "$RUNNER_TEMP/submit.json"
+            exit 1
+          fi
+          run_id=$(jq -r '.runId' "$RUNNER_TEMP/submit.json")
+          echo "runId=$run_id (submit HTTP $code)"
+          state=""
+          for _ in $(seq 1 120); do
+            curl -sS -H "Authorization: Bearer $RUNNER_API_KEY" \
+              "$RUNNER_API_URL/v1/runs/$run_id/status" > "$RUNNER_TEMP/status.json"
+            state=$(jq -r '.state // empty' "$RUNNER_TEMP/status.json")
+            case "$state" in
+              succeeded|failed|cancelled) break ;;
+            esac
+            sleep 5
+          done
+          echo "final state: ${state:-none}"
+          case "$state" in
+            succeeded|failed|cancelled) ;;
+            *)
+              echo "::error::run did not reach a terminal state (last: ${state:-unknown})"
+              cat "$RUNNER_TEMP/status.json"
+              exit 1
+              ;;
+          esac
+          echo "--- result"
+          curl -sS -H "Authorization: Bearer $RUNNER_API_KEY" \
+            "$RUNNER_API_URL/v1/runs/$run_id/result" | jq .
+          [ "$state" = succeeded ]
+
+      - name: Accepted — RUNNER_API not configured yet
+        if: env.RUNNER_API_URL == '' || env.RUNNER_API_KEY == ''
+        run: echo "принято, RUNNER_API настроен не будет до деплоя VM-сервиса (runner-jobs#12)"
