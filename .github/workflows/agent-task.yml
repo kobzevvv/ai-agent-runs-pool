@@ -34,8 +34,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      EVENT_NAME: ${{ github.event_name }}
-      EVENT_JSON: ${{ toJSON(github.event) }}
+      # Событие читаем из $GITHUB_EVENT_PATH, а НЕ кладём в env: GitHub печатает env-блок
+      # каждого шага в лог, а логи этой репы публичные — toJSON(github.event) вываливал бы
+      # ПОЛНЫЙ текст задачи мимо обрезки %.500s (кейс C1 эпика ai-agent-run-api#1).
       RUNNER_API_URL: ${{ secrets.RUNNER_API_URL }}
       RUNNER_API_KEY: ${{ secrets.RUNNER_API_KEY }}
     steps:
@@ -43,16 +44,16 @@ jobs:
         id: payload
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            TASK=$(jq -r '.inputs.task // empty' <<<"$EVENT_JSON")
-            LOCATION=$(jq -r '.inputs.location // empty' <<<"$EVENT_JSON")
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            TASK=$(jq -r '.inputs.task // empty' "$GITHUB_EVENT_PATH")
+            LOCATION=$(jq -r '.inputs.location // empty' "$GITHUB_EVENT_PATH")
             REPO=""; PROFILE=""; ARTIFACT_REF=""
           else
-            TASK=$(jq -r '.client_payload.task // empty' <<<"$EVENT_JSON")
-            LOCATION=$(jq -r '.client_payload.location // empty' <<<"$EVENT_JSON")
-            REPO=$(jq -r '.client_payload.repo // empty' <<<"$EVENT_JSON")
-            PROFILE=$(jq -r '.client_payload.profile // empty' <<<"$EVENT_JSON")
-            ARTIFACT_REF=$(jq -r '.client_payload.artifactRef // empty' <<<"$EVENT_JSON")
+            TASK=$(jq -r '.client_payload.task // empty' "$GITHUB_EVENT_PATH")
+            LOCATION=$(jq -r '.client_payload.location // empty' "$GITHUB_EVENT_PATH")
+            REPO=$(jq -r '.client_payload.repo // empty' "$GITHUB_EVENT_PATH")
+            PROFILE=$(jq -r '.client_payload.profile // empty' "$GITHUB_EVENT_PATH")
+            ARTIFACT_REF=$(jq -r '.client_payload.artifactRef // empty' "$GITHUB_EVENT_PATH")
           fi
           if [ -z "$TASK" ]; then
             echo "::error::task is empty — nothing to run"
